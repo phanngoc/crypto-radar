@@ -3,9 +3,14 @@
 CryptoRadar — Framework phân tích đầu tư tiền điện tử tự động.
 
 Cách dùng:
-  python main.py                    # Chế độ tương tác
-  python main.py BTC 10000 swing    # Inline args
-  python main.py --positions        # Xem lệnh paper đang mở
+  python main.py                         # Chế độ tương tác (Binance data)
+  python main.py BTC 10000 swing         # Inline args
+  python main.py --positions             # Xem lệnh paper đang mở
+
+  # Auto-trading Agent (OKX):
+  python main.py --agent                 # Paper agent, TF=15m, watchlist mặc định
+  python main.py --agent live            # Live agent trên OKX (cần .env)
+  python main.py --agent paper --tf 1h --watchlist BTC/USDT,ETH/USDT --capital 200
 """
 from __future__ import annotations
 
@@ -157,18 +162,95 @@ def run_analysis(
             trader.execute(asset, trade_plan, score)
 
 
+def run_agent(args: list[str]) -> None:
+    """Khởi động auto-trading agent."""
+    from src.agent import CryptoAgent
+    from src.config import (
+        AGENT_WATCHLIST, AGENT_TIMEFRAME, AGENT_CONFIRM_TF,
+        AGENT_CAPITAL_PER_TRADE, AGENT_RISK_PCT, AGENT_SIGNAL_THRESHOLD,
+    )
+
+    # Parse agent args: --agent [paper|live] [options]
+    mode = "paper"
+    if args and args[0] in ("paper", "live"):
+        mode = args.pop(0)
+
+    # Parse options: --tf 15m --watchlist BTC/USDT,ETH --capital 200 --threshold 30
+    tf          = AGENT_TIMEFRAME
+    confirm_tf  = AGENT_CONFIRM_TF
+    watchlist   = list(AGENT_WATCHLIST)
+    capital     = AGENT_CAPITAL_PER_TRADE
+    risk_pct    = AGENT_RISK_PCT
+    threshold   = AGENT_SIGNAL_THRESHOLD
+
+    i = 0
+    while i < len(args):
+        opt = args[i]
+        val = args[i + 1] if i + 1 < len(args) else ""
+        if opt in ("--tf", "--timeframe"):
+            tf = val; i += 2
+        elif opt in ("--confirm-tf",):
+            confirm_tf = val; i += 2
+        elif opt in ("--watchlist", "--coins"):
+            watchlist = [s.strip() for s in val.split(",")]
+            # Normalise: BTC → BTC/USDT
+            from src.okx_fetcher import OKXFetcher
+            watchlist = [OKXFetcher.normalize_symbol(s) for s in watchlist]
+            i += 2
+        elif opt in ("--capital",):
+            capital = float(val); i += 2
+        elif opt in ("--risk",):
+            risk_pct = float(val) / 100; i += 2
+        elif opt in ("--threshold",):
+            threshold = int(val); i += 2
+        else:
+            i += 1
+
+    if mode == "live":
+        from src.config import OKX_API_KEY
+        if not OKX_API_KEY:
+            console.print(
+                "[red]❌ Live mode cần OKX_API_KEY trong .env\n"
+                "   Xem .env.example để biết cách cấu hình.[/red]"
+            )
+            return
+        console.print(
+            "\n[bold red]⚠  LIVE TRADING MODE — lệnh THẬT sẽ được đặt trên OKX![/bold red]"
+        )
+        confirm = input("Nhập 'YES' để xác nhận: ").strip()
+        if confirm != "YES":
+            console.print("[dim]Đã huỷ.[/dim]")
+            return
+
+    agent = CryptoAgent(
+        mode=mode,
+        watchlist=watchlist,
+        timeframe=tf,
+        confirm_tf=confirm_tf,
+        capital=capital,
+        risk_pct=risk_pct,
+        signal_threshold=threshold,
+    )
+    agent.start()
+
+
 def main() -> None:
     console.print(BANNER)
 
     args = sys.argv[1:]
 
-    # Lệnh đặc biệt: xem positions
+    # ── Agent mode ────────────────────────────────────────────────────────────
+    if args and args[0] in ("--agent", "-a", "agent"):
+        run_agent(args[1:])
+        return
+
+    # ── Xem positions ─────────────────────────────────────────────────────────
     if args and args[0] in ("--positions", "-p", "positions"):
         trader = Trader()
         trader.show_open_positions()
         return
 
-    # Inline mode: python main.py BTC 10000 swing 2
+    # ── Inline mode: python main.py BTC 10000 swing 2 ────────────────────────
     if len(args) >= 3:
         asset   = normalize_symbol(args[0])
         capital = float(args[1])
@@ -177,7 +259,7 @@ def main() -> None:
         run_analysis(asset, capital, tf_raw, risk_pct)
         return
 
-    # Interactive mode
+    # ── Interactive mode ──────────────────────────────────────────────────────
     try:
         asset, capital, tf_raw, risk_pct = interactive_mode()
         run_analysis(asset, capital, tf_raw, risk_pct)
